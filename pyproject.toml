@@ -4,25 +4,26 @@ version = "0.1.0"
 description = "A python binding for flecs using ctypes"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = [
-    "bidict>=0.23.1",
-    "ctypesgen>=1.1.1",
-    "plum-dispatch>=2.5.8",
-    "ruff>=0.12.4",
-]
+dependencies = []
+
+[build-system]
+requires = ["scikit-build-core>=0.11,<0.12"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+wheel.packages = ["src/pyflecs"]
+wheel.py-api = "py3"
+sdist.include = ["vendor/flecs/**", "tools/**", "tests/**", "examples/**", "CMakeLists.txt"]
+sdist.exclude = ["src/pyflecs/*.dylib", "src/pyflecs/*.so", "src/pyflecs/*.dll"]
 
 [tool.pytest.ini_options]
-pythonpath = [
-    "src"
-]
 testpaths = [
     "tests"
 ]
 
-[tool.setuptools.package-data]
-pyflecs = ["**/*.dylib"]
-
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
+    "ctypesgen==1.1.1",
+    "ruff==0.12.4",
 ]

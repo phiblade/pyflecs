@@ -11,3 +11,8 @@ wheels/
 
 .vscode/
 
+
+# Native artifacts are built during package installation.
+*.dylib
+*.so
+*.dll

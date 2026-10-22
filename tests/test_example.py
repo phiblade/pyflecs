@@ -9,7 +9,7 @@ def test_query_example():
     result = subprocess.run(
         [sys.executable, str(root / "examples/query_basic.py")],
         cwd=root,
-        env={**os.environ, "PYTHONPATH": str(root / "src")},
+        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
         capture_output=True,
         text=True,
         timeout=10,
