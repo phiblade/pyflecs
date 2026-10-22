@@ -1,6 +1,4 @@
-from ctypes import POINTER, _Pointer, byref, cast, sizeof
-
-from bidict import bidict
+from ctypes import POINTER, _Pointer, alignment, byref, cast, sizeof
 
 from .cflecs import (
     String,
@@ -39,7 +37,10 @@ patch()  # TODO: Move to init
 class World:
     def __init__(self, pipeline: Pipeline | None = None):
         self._value: _Pointer[struct_ecs_world_t] = ecs_init()
-        self._systemdescs = bidict[EntityId, SystemDescription]()
+        self._callback_errors: list[BaseException] = []
+        self._systemdescs: dict[int, SystemDescription] = {}
+        self._cmptypes: dict[int, type[Component]] = {}
+        self._cmpids: dict[type[Component], int] = {}
 
     @property
     def pipeline(self):
@@ -53,6 +54,9 @@ class World:
 
     def component(self, cls: type[Component]):
         """Create a new component in this world."""
+
+        if cls in self._cmpids:
+            return self._cmpids[cls]
 
         desc = struct_ecs_component_desc_t()
 
@@ -69,12 +73,31 @@ class World:
 
         desc.entity = entity_id
         desc.type.size = ecs_size_t(sizeof(cls))
-        desc.type.alignment = ecs_size_t(cls._align_)
+        desc.type.alignment = ecs_size_t(alignment(cls) if sizeof(cls) else 0)
         # desc.type.name = Box(String(component.__name__.encode("utf-8"))).value()
 
         # TODO: hooks
 
-        return ecs_component_init(self._value, byref(desc))
+        component_id = ecs_component_init(self._value, byref(desc))
+        self._cmptypes[component_id] = cls
+        self._cmpids[cls] = component_id
+        return component_id
+
+    def cmptypeid(self, cls: type[Component]) -> int:
+        """Look up a component registered in this world."""
+        try:
+            return self._cmpids[cls]
+        except KeyError:
+            raise ValueError(
+                "Component must be registered in this world first"
+            ) from None
+
+    def _component_id(self, component: int | type[Component]) -> int:
+        if isinstance(component, int):
+            return component
+        if isinstance(component, type) and issubclass(component, Component):
+            return self.cmptypeid(component)
+        raise TypeError("Expected a component class or integer entity ID")
 
     def entity(self):
         """Create a new entity in this world."""
@@ -89,47 +112,55 @@ class World:
     def add(self, e: EntityId, i: EntityId | EntityIdPair):
         """Add a component to the specified entity."""
 
-        match i:
-            case tuple():
-                return self.add_pair(e, i)
-            case type() if issubclass(i, Component):
-                return ecs_add_id(self._value, e, self.fidof(i))
-            case int():
-                return ecs_add_id(self._value, e, i)
+        if isinstance(i, tuple):
+            return self.add_pair(e, i)
+        return ecs_add_id(self._value, e, self._component_id(i))
 
     def add_pair(
         self, entity_id: int, pair: tuple[int | type[Component], int | type[Component]]
     ):
-        """Add a pair to the specified entity."""
-
+        """Add a relationship pair using entity IDs or registered component classes."""
         ecs_add_pair(
             self._value,
             entity_id,
-            EntityId(pair[0]) if pair[0] is int else self._cmptypes.inverse[pair[0]],  # type: ignore
-            EntityId(pair[1]) if pair[1] is int else self._cmptypes.inverse[pair[1]],  # type: ignore
+            self._component_id(pair[0]),
+            self._component_id(pair[1]),
         )
 
-    def set[T: Component](
-        self, entity_id: EntityId, component_id: EntityId, component: T
+    def set(
+        self,
+        entity_id: int,
+        component_id: int | type[Component] | Component,
+        component: Component | None = None,
     ):
-        """Set the value(s) of the component on the specified entity."""
+        """Set a component by ID/class, or infer its ID from the instance."""
+        if component is None:
+            component = component_id
+            component_id = type(component)
+        component_id = self._component_id(component_id)
+        cls = self._cmptypes.get(component_id)
+        if cls is None or type(component) is not cls:
+            raise TypeError(
+                "Component instance must match the registered component type"
+            )
+        if not sizeof(cls):
+            raise ValueError("Tags have no data; use add() instead")
+        ecs_set_id(
+            self._value, entity_id, component_id, sizeof(component), byref(component)
+        )
 
-        ecs_set_id(self._value, entity_id, component_id, sizeof(T), byref(component))  # type: ignore
-
-    def get[T: Component](
-        self, entity_id: EntityId, component_id: EntityId
-    ) -> T | None:
-        """Get the value of a component by its component id."""
-
-        component_void_ptr = ecs_get_id(self._value, entity_id, component_id)
-
-        if not component_void_ptr:
-            return None
-
-        component_ptr = cast(component_void_ptr, POINTER(T))  # type: ignore
-        component = component_ptr.contents
-
-        return component  # type: ignore
+    def get(
+        self, entity_id: int, component_id: int | type[Component]
+    ) -> Component | None:
+        """Return a live component view, or None if the entity does not have it."""
+        component_id = self._component_id(component_id)
+        cls = self._cmptypes.get(component_id)
+        if cls is None:
+            raise ValueError("Component ID is not registered in this world")
+        if not sizeof(cls):
+            raise ValueError("Tags have no component data")
+        ptr = ecs_get_id(self._value, entity_id, component_id)
+        return cast(ptr, POINTER(cls)).contents if ptr else None
 
     def clear(self, entity_id: EntityId):
         """Clear the specified entity of all components."""
@@ -139,9 +170,11 @@ class World:
     def delete(self, entity_id: EntityId):
         """Delete the specified entity."""
 
-        del self._systemdescs[entity_id]
-
         ecs_delete(self._value, entity_id)
+        self._systemdescs.pop(entity_id, None)
+        cls = self._cmptypes.pop(entity_id, None)
+        if cls is not None:
+            del self._cmpids[cls]
 
     def query(self, d: QueryDescription):
         """Create a query from a query description object."""
@@ -161,6 +194,7 @@ class World:
     def system(self, system_desc: SystemDescription) -> EntityId:
         """Create a new system."""
 
+        system_desc = system_desc.resolved(self)
         system_id = ecs_system_init(self._value, byref(system_desc._value))
 
         # Pyflecs must keep a reference so the object is not garbage collected while flecs is using it
@@ -187,8 +221,17 @@ class World:
         """Run the specified system once."""
 
         ecs_run(self._value, system_id, delta, None)
+        self._raise_callback_error()
 
     def progress(self):
         """Move time forward on this world, triggering pipeline processing on the delta time."""
 
-        return ecs_progress(self._value, 0)
+        result = ecs_progress(self._value, 0)
+        self._raise_callback_error()
+        return result
+
+    def _raise_callback_error(self):
+        if self._callback_errors:
+            error = self._callback_errors[0]
+            self._callback_errors.clear()
+            raise error

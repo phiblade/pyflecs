@@ -2,6 +2,7 @@ from ctypes import c_void_p
 from typing import Callable
 
 from .cflecs import (
+    ecs_iter_fini,
     ecs_run_action_t,
     struct_ecs_system_desc_t,
 )
@@ -10,17 +11,25 @@ from .inspect import SPACER
 from .query import QueryDescription, QueryExecutor, QueryResult
 from .types import ContextFreeAction, Time
 
-type EachAction = Callable[[QueryExecutor], None]
+type EachAction = Callable[[QueryResult], None]
 
 idof = id
 
 
-def _each_action(func: EachAction):
+def _each_action(func: EachAction, world=None):
     """Decorator for a system action which is executed once per query match."""
 
     @ecs_run_action_t
     def wrapper(iterator):
-        return func(QueryResult(iterator.contents, 0))  # type: ignore
+        if world is not None and world._callback_errors:
+            return
+        try:
+            for row in range(max(1, iterator.contents.count)):
+                func(QueryResult(iterator.contents, row, world))
+        except BaseException as error:
+            if world is None:
+                raise
+            world._callback_errors.append(error)
 
     return wrapper
 
@@ -28,12 +37,22 @@ def _each_action(func: EachAction):
 type OnceAction = Callable[[QueryExecutor], None]
 
 
-def _once_action(func: OnceAction):
+def _once_action(func: OnceAction, world=None):
     """Decorator for a system action which is executed once per tick."""
 
     @ecs_run_action_t
     def wrapper(iterator):
-        return func(QueryExecutor(iterator.contents))
+        executor = QueryExecutor(iterator.contents, world)
+        try:
+            func(executor)
+        except BaseException as error:
+            if world is None:
+                raise
+            world._callback_errors.append(error)
+        finally:
+            if executor._ready and not executor._done:
+                ecs_iter_fini(iterator)
+                executor._done = True
 
     return wrapper
 
@@ -163,7 +182,7 @@ class SystemDescriptionBuilder:
         d.multi_threaded = self._multi_threaded
         d.immediate = self._immediate
 
-        return SystemDescription(d, self._query)
+        return SystemDescription(d, self._query, self._callback, self._run)
 
 
 class SystemDescription:
@@ -189,14 +208,27 @@ class SystemDescription:
         self,
         system_desc: struct_ecs_system_desc_t,
         query: QueryDescription | None = None,
+        callback: EachAction | None = None,
+        run: OnceAction | None = None,
     ):
+        self._callback = callback
+        self._run = run
         self._value = system_desc
         self._query = query
 
-    def resolve(self, world):
-        if self._query is not None:
-            self._query.resolve(world)
-            self._value.query = QueryDescription.copy(self._query)._value
+    def resolved(self, world):
+        query = QueryDescription.copy(self._query) if self._query is not None else None
+        value = struct_ecs_system_desc_t.from_buffer_copy(self._value)
+        if query is not None:
+            query.resolve(world)
+            value.query = query._value
+        if self._callback is not None:
+            value.callback = _each_action(self._callback, world)
+        if self._run is not None:
+            value.run = _once_action(self._run, world)
+        result = SystemDescription(value, query, self._callback, self._run)
+        result._source = self
+        return result
 
     @property
     def callback(self) -> EachAction:
@@ -277,3 +309,17 @@ class SystemDescription:
 
     def __repr__(self):
         return "\n".join(["SystemDescription:", self.repr(depth=1)])
+
+
+def system(*, query: QueryDescription | None = None):
+    """Describe a system using an instance method named run or each."""
+
+    def decorate(cls):
+        instance = cls()
+        return SystemDescription.kwargs(
+            query=query,
+            run=getattr(instance, "run", None),
+            callback=getattr(instance, "each", None),
+        )
+
+    return decorate

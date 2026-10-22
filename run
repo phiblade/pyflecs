@@ -1,3 +1,4 @@
 #!/usr/bin/env sh
-PYTHONPATH=src uv run test/test.py
-
+set -eu
+cd "$(dirname "$0")"
+PYTHONPATH=src uv run examples/query_basic.py

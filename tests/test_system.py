@@ -31,7 +31,7 @@ def test_system_run():
     assert executed
 
 
-def _test_system_callback():
+def test_system_callback():
     world = World()
 
     foo = world.component(BasicComponent)
@@ -63,7 +63,7 @@ def _test_system_callback():
     assert executed
 
 
-def _test_system_kwargs():
+def test_system_kwargs():
     world = World()
 
     executed = False

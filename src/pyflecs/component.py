@@ -1,4 +1,4 @@
-from ctypes import Structure, sizeof
+from ctypes import Structure
 from inspect import get_annotations
 from typing import Self
 
@@ -54,16 +54,6 @@ def component(cls):
 
     field_configs = [configure_field(k, t) for k, t in fields]
 
-    def compute_align():
-        highest = 0
-
-        for _, typ, _, _ in field_configs:
-            size = sizeof(typ)
-            if size > highest:
-                highest = size
-
-        return highest
-
     def map_init_arg(i, v):
         config = field_configs[i]
 
@@ -83,7 +73,7 @@ def component(cls):
         _fields_ = [(tup[0], tup[1]) for tup in field_configs]
 
         # The ctypes struct alignment
-        _align_ = compute_align()
+        # Let ctypes compute the native alignment.
 
         # The ctypes struct pack
         # _pack_ = _compute_pack(cls)        # The ctypes struct pack

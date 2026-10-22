@@ -39,7 +39,7 @@ def main():
 
     world.set(e, p)
 
-    sid, _ = world.system_once(lambda it: print("HELLO"))
+    sid = world.system_once(lambda it: print("HELLO"))
 
     world.run(sid)
 

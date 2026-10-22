@@ -2,6 +2,21 @@
 
 Python bindings for the excellent [flecs](https://www.flecs.dev/flecs/) library.
 
+## Development quick start
+
+The checked-in Flecs library currently supports macOS on Apple Silicon. Python
+3.13 or newer is required. From the repository root:
+
+```sh
+uv sync --locked
+uv run pytest
+./run
+```
+
+`./run` executes `examples/query_basic.py`: it creates three entities, runs a
+movement system, and prints their updated positions. Native builds for other
+platforms and explicit world/query cleanup are still pending.
+
 ## Design
 
 pyflecs consists of two parts; 1- `cflecs` and 2- `pyflecs`.
@@ -110,13 +125,41 @@ def main():
 
 Similarly to as in the component case, `world.entity()` returns an EntityId.
 
+### Setting and getting component data
+
+Register each component class once per world, then set values using an instance:
+
+```python
+position_id = world.component(Position)
+e = world.entity()
+p = Position()
+p.x, p.y = 1.0, 2.0
+world.set(e, p)
+
+# Explicit class or ID forms are also supported:
+world.set(e, Position, p)
+world.set(e, position_id, p)
+assert world.get(e, Position).x == 1.0
+assert world.get(e, position_id).y == 2.0
+```
+
+`get()` returns `None` when the entity lacks the component. Returned components
+are live views into Flecs storage, not copies; do not retain them across changes
+that move or delete that storage. Unregistered classes and mismatched component
+types raise Python exceptions. Empty components are tags: use `world.add(e, Tag)`
+rather than `set()` or `get()`.
+
+String ownership is not yet managed by the world. Keep the original Python
+component instance alive while Flecs uses its string pointers. Robust string
+ownership and view lifetime management remain unfinished.
+
 ## Queries
 
 In flecs, a query is built off of a prepared template called a query description. Pyflecs provides a wrapper class and builder interface with various methods you can use to easily build instances of query description:
 
 ```python
     qd1 = QueryDescriptionBuilder()     # Builder
-    qd2 = QueryDescription.builder()    # Convenience method of Term
+    qd2 = QueryDescription.builder()    # Convenience method
     qd3 = QueryDescription.kwargs()     # Forward args to builder via kwargs
     qd4 = QueryDescription.tuple()      # Forward term args only via tuple
 ```
@@ -186,7 +229,7 @@ Creating a query must be done through world. Some convenience methods are also p
 
 ### Query execution
 
-In the flecs world we have basically only one concept in regards to execution of queries, which is the iterator. Pyflecs wraps iterator in two different objects; the QueryExecutor and the QueryResult. QueryExecutor represents an iterator that is ready to be advanced, while QueryResult represents an iterator that is currently pointing at a distinct result and may not be advanced. Because QueryExecutor performs iteration, it is a python iterable and can be used simply the way the any python iterable may be used, and returns a sequence of QueryResult objects, which have accessor methods on the underlying data.
+In the flecs world we have basically only one concept in regards to execution of queries, which is the iterator. Pyflecs wraps iterator in two different objects; the QueryExecutor and the QueryResult. QueryExecutor represents an iterator that is ready to be advanced, while QueryResult represents an iterator that is currently pointing at a distinct result and may not be advanced. Because QueryExecutor performs iteration, it is a python iterable and can be used simply the way the any python iterable may be used, and returns one QueryResult per matching entity, including when Flecs batches multiple entities into a table. Each result has accessor methods on the underlying data. Consume result views inside the loop; they are not snapshots that can be retained after iteration advances.
 
 ```python
     executor = q.executor()
@@ -215,23 +258,15 @@ In the flecs world we have basically only one concept in regards to execution of
 ```
 
 
-### A warning about query result access
+### Query result access
 
-Note that accessing components in flecs is dependent upon struct size. When you call `result.component(0, Position)`, you're specify that you want to get index `0` of the components returned as part of this query result, and the object is of type `Position`. If you specify the wrong component object, or specify the components in the wrong order, pyflecs cannot guarantee what will happen. Take this, for example:
+`result.entity()` returns the current entity ID. `result.component(index, Type)`
+uses a zero-based field index and checks the registered component type before
+accessing native memory. A mismatched type raises `TypeError`, and an invalid
+field index raises `IndexError`. Tags have no component data.
 
-```python
-    @component
-    class Foo:
-        a: int
-        b: int
-
-    @component
-    class Bar:
-        b: float
-```
-
-This describes two components. Component `Foo` has a computed size `sizeof(Int64) * 2`, while Bar has a single float value and is of size `sizeof(float)`. If we were to ask flecs for a `Foo` when a QueryResult contains a `Foo`, flecs will give us a chunk of memory sized `sizeof(Int64) * 2`, which is too big. This is basically a classic C buffer overrun scenario. There are no protective mechanisms in place to prevent you from doing this at the current time, although there may be in future. The bottom of line is, be careful about defining and using your types, and be aware of how the underlying data is structured.
-
+Query descriptions can be reused in different worlds; component classes are
+resolved independently against each world's registrations.
 
 ## Systems
 
@@ -244,7 +279,7 @@ pyflecs provides a declarative template syntax similar to the one used to declar
 ```python
 @system()
 class RunSystem:
-    def run(executor: QueryExecutor):
+    def run(self, executor: QueryExecutor):
         print("I run")
 ```
 
@@ -253,7 +288,7 @@ Systems with a `run` method may also perform queries, but since they override th
 ```python
 @system(query=QueryDescription.tuple([(Position,)]))
 class IteratingSystem:
-    def each(result: QueryResult):
+    def each(self, result: QueryResult):
         print("I process result")
 ```
 
@@ -264,7 +299,7 @@ Creating a system must be done through world, similarly as components.
 ```python
     run_system_instance = world.system(RunSystem)
     iterating_system_instance = world.system(IteratingSystem)
-    print(run_system_instance.id) # the EntityId
+    print(run_system_instance) # the integer EntityId
 ```
 
 ### Running a system
@@ -273,8 +308,12 @@ Systems must be run inside world.
 
 ```python
     world.run(system_instance)
-    world.run(system_instance.id) # either works
+
 ```
+
+By default, system callbacks run on the calling thread. Exceptions from Python `run` or
+`each` callbacks are re-raised after `world.run()` or `world.progress()` returns
+from native execution.
 
 ## Running pyflecs
 
